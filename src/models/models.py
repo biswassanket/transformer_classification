@@ -1649,33 +1649,35 @@ class transformer_net(nn.Module):
 
         # OUTPUT OF CNN BS X 2048 X 7 X 7 =  100352
         self.fc1_bn = nn.BatchNorm1d(2048 * 7 * 7)
-        self.fc1 = nn.Linear(2048 * 7 * 7, 1024)
+        self.fc1 = nn.Linear(2048 * 7 * 7, 2048)
 
         # LOCAL FEATURES N X 36 X 2048
         self.fc2_bn = nn.BatchNorm1d(self.args.max_visual)
-        self.fc2 = nn.Linear(2048, 1024)
+        self.fc2 = nn.Linear(2048, 1920)
 
         # TEXTUAL FEATURES N X 36 X 2048
         self.bn_text1 = nn.BatchNorm1d(self.args.max_textual)
-        self.fc_text1 = nn.Linear(self.embedding_size, 128)
+        self.fc_text1 = nn.Linear(self.embedding_size, 1024)
         self.bn_text2 = nn.BatchNorm1d(self.args.max_textual)
-        self.fc_text2 = nn.Linear(128, 1024)
+        self.fc_text2 = nn.Linear(1024, 1920)
 
         # BBOX POSITIONAL ENCODING OF LOCAL FEATURES AND TEXT
         self.bn_encod_bboxes = nn.BatchNorm1d(self.args.max_visual + self.args.max_textual)
-        self.fc_encod_bboxes = nn.Linear(4, 1024)
+        self.fc_encod_bboxes = nn.Linear(4, 128)
 
         # TRANSFORMER
         # create conversion layer
-        hidden_dim = 1024
+        hidden_dim = 2048
         # self.conv = nn.Conv2d(2048, hidden_dim, 1)
         nheads = 8
         num_encoder_layers = 6
         num_decoder_layers = 6
         # create a default PyTorch transformer
-        self.transformer = nn.Transformer(hidden_dim, nheads, num_encoder_layers, num_decoder_layers)
+        # self.transformer = nn.Transformer(hidden_dim, nheads, num_encoder_layers, num_decoder_layers)
+        encoder_layer = nn.TransformerEncoderLayer(hidden_dim, nheads)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_encoder_layers, norm=nn.LayerNorm(normalized_shape=hidden_dim, eps=1e-6))
         # output positional encodings (object queries)
-        self.query_pos = nn.Parameter(torch.rand(self.args.max_visual + self.args.max_textual, hidden_dim))
+        # self.query_pos = nn.Parameter(torch.rand(self.args.max_visual + self.args.max_textual, hidden_dim))
 
         # spatial positional encodings
         # note that in baseline DETR we use sine positional encodings
@@ -1683,12 +1685,17 @@ class transformer_net(nn.Module):
         # self.col_embed = nn.Parameter(torch.rand(50, hidden_dim // 2))
 
         # # FC OUTPUT from TRANSFORMER
-        self.bn_out_transformer = nn.BatchNorm1d(1024)
-        self.fc_out_transformer = nn.Linear(1024, 1024)
+        self.bn_out_transformer = nn.BatchNorm1d(2048)
+        self.fc_out_transformer = nn.Linear(2048, 2048)
 
         # FINAL CLASSIF
-        self.final_bn = nn.BatchNorm1d(1024 * 2)
-        self.final_fc = nn.Linear(1024 * 2, num_classes)
+        if self.args.fusion == 'concat':
+            # CONCATENATION AS FUSION
+            self.final_bn = nn.BatchNorm1d(2048 * 2)
+            self.final_fc = nn.Linear(2048 * 2, num_classes)
+        else:
+            print("Error: Last Layer Fusion selected not implemented")
+
 
     def forward(self, im, textual_features, sample_size, local_features, text_bboxes, local_bboxes):
         x = self.cnn_features(im)  # Size (BS x 2048 x 7 x 7)
@@ -1710,6 +1717,7 @@ class transformer_net(nn.Module):
         local_features = F.leaky_relu(self.fc2(self.fc2_bn(local_features)))
 
         # FC for Visual and Textual BBOXES
+        # import pdb;pdb.set_trace()
         bboxes_feats = torch.cat((local_bboxes, text_bboxes), dim=1)
         bboxes_feats = self.bn_encod_bboxes(bboxes_feats)
         bboxes_feats = F.leaky_relu(self.fc_encod_bboxes(bboxes_feats))
@@ -1718,18 +1726,22 @@ class transformer_net(nn.Module):
         local_features = torch.cat((local_features, textual_features), dim=1)
 
         # CONCAT EACH BBOX AT THE LAST COLUMN OF TEXTUAL AND VISUAL FEATURES
-        # local_features = torch.cat((local_features, bboxes_feats), dim=2)
+        # import pdb; pdb.set_trace()
 
+        local_features = torch.cat((local_features, bboxes_feats), dim=2)
+        # local_features = local_features.permute(0, 2, 1)
         # TRANSFORMER LOCAL VISUAL + TEXTUAL FEATURES
         # construct positional encodings
-        input_batch = local_features.shape[0]
+        # input_batch = local_features.shape[0]
 
         # pos = self.col_embed.repeat(input_batch, 1, 1)
-        pos = bboxes_feats
-        query_pos = self.query_pos.repeat(input_batch, 1, 1)
+        # pos = bboxes_feats
+        # query_pos = self.query_pos.repeat(input_batch, 1, 1)
 
         # propagate through the transformer
-        local_features = self.transformer( pos + local_features, query_pos)
+        # local_features = self.transformer( pos + local_features, query_pos)
+        local_features = self.transformer(local_features)
+        # local_features = local_features.permute(0, 2, 1)
 
         local_features = torch.mean(local_features, dim =1)
 
